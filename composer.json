@@ -1,0 +1,28 @@
+{
+    "name": "pr0ject-x/px-pantheon",
+    "description": "The project-X pantheon.io plugin.",
+    "type": "px-plugin",
+    "license": "MIT",
+    "prefer-stable": true,
+    "minimum-stability": "dev",
+    "authors": [
+        {
+            "name": "Travis Tomka",
+            "email": "underoathosx@gmail.com"
+        }
+    ],
+    "require": {
+        "php": ">=7.2",
+        "pr0ject-x/px": "^1.0.9",
+        "pantheon-systems/terminus": "^2.3"
+    },
+    "require-dev": {
+        "squizlabs/php_codesniffer": "^3.5",
+        "phpmd/phpmd": "^2.8"
+    },
+    "autoload": {
+        "psr-4": {
+            "Pr0jectX\\PxPantheon\\": "./src"
+        }
+    }
+}
