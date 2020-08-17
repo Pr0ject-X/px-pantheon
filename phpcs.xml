@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<ruleset name="PSR-12 Coding Standards">
+    <file>./src</file>
+    <rule ref="PSR12"/>
+    <arg name="warning-severity" value="0"/>
+</ruleset>
