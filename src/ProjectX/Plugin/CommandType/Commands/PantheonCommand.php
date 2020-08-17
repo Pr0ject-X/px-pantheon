@@ -13,6 +13,7 @@ use Psr\Cache\CacheItemInterface;
 use Robo\Collection\CollectionBuilder;
 use Stringy\StaticStringy;
 use Symfony\Component\Console\Question\Question;
+use Symfony\Component\Process\ExecutableFinder;
 
 /**
  * Define the pantheon command.
@@ -87,6 +88,36 @@ class PantheonCommand extends PluginCommandTaskBase
             }
         } catch (\Exception $exception) {
             $this->error($exception->getMessage());
+        }
+    }
+
+    /**
+     * Install the terminus command utility system-wide.
+     */
+    public function pantheonInstallTerminus(): void
+    {
+        if (!$this->isTerminusInstalled()) {
+            try {
+                $userDir = PxApp::userDir();
+
+                $stack = $this->taskExecStack()
+                    ->exec("mkdir {$userDir}/terminus")
+                    ->exec("cd {$userDir}/terminus")
+                    ->exec('curl -O https://raw.githubusercontent.com/pantheon-systems/terminus-installer/master/builds/installer.phar')
+                    ->exec('php installer.phar install');
+
+                $results = $stack->run();
+
+                if ($results->wasSuccessful()) {
+                    $this->success(
+                        'The terminus utility has successfully been installed!'
+                    );
+                }
+            } catch (\Exception $exception) {
+                $this->error($exception->getMessage());
+            }
+        } else {
+            $this->note('The terminus utility has already been installed!');
         }
     }
 
@@ -352,6 +383,17 @@ class PantheonCommand extends PluginCommandTaskBase
         } catch (\Exception $exception) {
             $this->error($exception->getMessage());
         }
+    }
+
+    /**
+     * Determine if terminus has been installed.
+     *
+     * @return bool
+     *   Return true if terminus is installed; otherwise false.
+     */
+    protected function isTerminusInstalled(): bool
+    {
+        return $this->hasExecutable('terminus');
     }
 
     /**
@@ -665,6 +707,20 @@ class PantheonCommand extends PluginCommandTaskBase
                 }
             }
         ) ?? [];
+    }
+
+    /**
+     * Determine if an executable exist.
+     *
+     * @param string $executable
+     *   The name of the executable binary.
+     *
+     * @return bool
+     *   Return true if executable exist; otherwise false.
+     */
+    protected function hasExecutable(string $executable): bool
+    {
+        return (new ExecutableFinder())->find($executable) !== null;
     }
 
     /**
