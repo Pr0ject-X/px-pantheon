@@ -198,69 +198,73 @@ class PantheonCommand extends PluginCommandTaskBase
     /**
      * Create a site on the remote pantheon service.
      *
-     * @param string $siteLabel
+     * @param string|null $label
      *   Set the site human readable label.
-     * @param string $siteUpstream
+     * @param string|null $upstream
      *   Set the site upstream.
      *
      * @throws \Psr\Cache\InvalidArgumentException
      */
     public function pantheonCreateSite(
-        string $siteLabel = null,
-        string $siteUpstream = null
+        string $label = null,
+        string $upstream = null
     ): void {
         Pantheon::displayBanner();
 
-        $siteLabel = $siteLabel ?? $this->doAsk((new Question(
-            $this->formatQuestion('Input the site label')
-        ))->setValidator(function ($value) {
-            if (empty($value)) {
-                throw new \RuntimeException(
-                    'The site label is required!'
+        try {
+            $label = $label ?? $this->doAsk((new Question(
+                $this->formatQuestion('Input the site label')
+            ))->setValidator(function ($value) {
+                if (empty($value)) {
+                    throw new \RuntimeException(
+                        'The site label is required!'
+                    );
+                }
+                return $value;
+            }));
+
+            $upstreamOptions = $this->getUpstreamOptions();
+
+            $upstream = $upstream ?? $this->askChoice(
+                'Select the site upstream',
+                $upstreamOptions,
+                'empty'
+            );
+
+            if (isset($upstream) && !isset($upstreamOptions[$upstream])) {
+                throw new \InvalidArgumentException(
+                    sprintf('The site upstream value is invalid!')
                 );
             }
-            return $value;
-        }));
+            $name = strtolower(strtr($label, ' ', '-'));
 
-        $upstreamOptions = $this->getUpstreamOptions();
+            /** @var \Robo\Collection\CollectionBuilder $command */
+            $command = $this->terminusCommand()
+                ->setSubCommand('site:create')
+                ->args([
+                    $name,
+                    $label,
+                    $upstream
+                ]);
 
-        $siteUpstream = $siteUpstream ?? $this->askChoice(
-            'Select the site upstream',
-            $upstreamOptions,
-            'empty'
-        );
+            if ($this->confirm('Associate the site with an organization?', false)) {
+                $orgOptions = $this->getOrgOptions();
 
-        if (isset($siteUpstream) && !isset($upstreamOptions[$siteUpstream])) {
-            throw new \InvalidArgumentException(
-                sprintf('The site upstream value is invalid!')
-            );
-        }
-        $siteName = $this->getPantheonSiteName()
-            ?? StaticStringy::slugify($siteLabel);
-
-        $command = $this->terminusCommand()
-            ->setSubCommand('site:create')
-            ->args([
-                $siteName,
-                $siteLabel,
-                $siteUpstream
-            ]);
-
-        if ($this->confirm('Associate the site with an organization?', false)) {
-            $orgOptions = $this->getOrgOptions();
-
-            if (count($orgOptions) !== 0) {
-                if ($org = $this->askChoice('Select an organization', $orgOptions)) {
-                    $command->option($org);
+                if (count($orgOptions) !== 0) {
+                    if ($org = $this->askChoice('Select an organization', $orgOptions)) {
+                        $command->option('org', $org);
+                    }
                 }
             }
-        }
-        $result = $command->run();
+            $result = $command->run();
 
-        if ($result->wasSuccessful()) {
-            $this->success(
-                'The pantheon site was successfully created!'
-            );
+            if ($result->wasSuccessful()) {
+                $this->success(
+                    'The pantheon site was successfully created!'
+                );
+            }
+        } catch (\Exception $exception) {
+            $this->error($exception->getMessage());
         }
     }
 
