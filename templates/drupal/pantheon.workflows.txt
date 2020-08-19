@@ -4,9 +4,9 @@ workflows:
     after:
       - type: webphp
         description: 'Invoke the processes after code has been deployed.'
-        script: web/private/hooks/afterDeploy.php
+        script: private/hooks/afterDeploy.php
   sync_code:
     after:
       - type: webphp
         description: 'Invoke the processes after code has been pushed.'
-        script: web/private/hooks/afterSync.php
+        script: private/hooks/afterSync.php
