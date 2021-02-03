@@ -427,13 +427,13 @@ class PantheonCommand extends PluginCommandTaskBase
             }
             $syncDbCollection->addTask(
                 $this->taskSymfonyCommand($command)->arg(
-                    'source_file',
+                    'importFile',
                     $sourceFile
                 )
             );
             $importResult = $syncDbCollection->run();
 
-            if ($importResult->wasSuccessful() && $sourceCleanUp) {
+            if ($sourceCleanUp && $importResult->wasSuccessful()) {
                 $this->_remove($sourceFile);
                 return true;
             }
