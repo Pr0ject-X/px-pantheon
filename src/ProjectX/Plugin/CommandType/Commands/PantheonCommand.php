@@ -11,6 +11,7 @@ use Pr0jectX\PxPantheon\ProjectX\Plugin\CommandType\PantheonCommandType;
 use Pr0jectX\Px\Task\LoadTasks as PxTasks;
 use Psr\Cache\CacheItemInterface;
 use Robo\Collection\CollectionBuilder;
+use Robo\Contract\VerbosityThresholdInterface;
 use Stringy\StaticStringy;
 use Symfony\Component\Console\Question\Question;
 use Symfony\Component\Process\ExecutableFinder;
@@ -95,8 +96,6 @@ class PantheonCommand extends PluginCommandTaskBase
             $this->error($exception->getMessage());
         }
     }
-
-
 
     /**
      * Install the terminus command utility system-wide.
@@ -421,13 +420,18 @@ class PantheonCommand extends PluginCommandTaskBase
      */
     protected function fetchLatestTerminusRelease(): string
     {
-        $version = $this->taskExec(
+        $task = $this->taskExec(
             'curl --silent "https://api.github.com/repos/pantheon-systems/terminus/releases/latest" \
             | perl -nle\'print $& while m#"tag_name": "\K[^"]*#g\''
-        )->run();
+        );
 
-        return $version->getMessage()
-            ?? self::TERMINUS_STABLE_VERSION;
+        $result = $task->printOutput(false)
+            ->setVerbosityThreshold(VerbosityThresholdInterface::VERBOSITY_DEBUG)
+            ->run();
+
+        $version = trim($result->getMessage());
+
+        return $version ?? self::TERMINUS_STABLE_VERSION;
     }
 
     /**
