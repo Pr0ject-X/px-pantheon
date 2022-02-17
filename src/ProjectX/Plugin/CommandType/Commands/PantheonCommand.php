@@ -96,6 +96,8 @@ class PantheonCommand extends PluginCommandTaskBase
         }
     }
 
+
+
     /**
      * Install the terminus command utility system-wide.
      *
@@ -107,7 +109,7 @@ class PantheonCommand extends PluginCommandTaskBase
         if (!$this->isTerminusInstalled()) {
             try {
                 $userDir = PxApp::userDir();
-                $version = $version ?? self::TERMINUS_STABLE_VERSION;
+                $version = $version ?? $this->fetchLatestTerminusRelease();
 
                 $stack = $this->taskExecStack()
                     ->exec("mkdir -p {$userDir}/terminus")
@@ -399,6 +401,7 @@ class PantheonCommand extends PluginCommandTaskBase
         }
     }
 
+
     /**
      * Determine if terminus has been installed.
      *
@@ -408,6 +411,23 @@ class PantheonCommand extends PluginCommandTaskBase
     protected function isTerminusInstalled(): bool
     {
         return $this->hasExecutable('terminus');
+    }
+
+    /**
+     * Fetch the latest terminus release.
+     *
+     * @return string
+     *   The latest release for terminus.
+     */
+    protected function fetchLatestTerminusRelease(): string
+    {
+        $version = $this->taskExec(
+            'curl --silent "https://api.github.com/repos/pantheon-systems/terminus/releases/latest" \
+            | perl -nle\'print $& while m#"tag_name": "\K[^"]*#g\''
+        )->run();
+
+        return $version->getMessage()
+            ?? self::TERMINUS_STABLE_VERSION;
     }
 
     /**
