@@ -23,6 +23,11 @@ class PantheonCommand extends PluginCommandTaskBase
     use PxTasks;
 
     /**
+     * Define the terminus stable version
+     */
+    private const TERMINUS_STABLE_VERSION = '3.0.5';
+
+    /**
      * Authenticate with the pantheon service.
      */
     public function pantheonLogin(): void
@@ -93,18 +98,23 @@ class PantheonCommand extends PluginCommandTaskBase
 
     /**
      * Install the terminus command utility system-wide.
+     *
+     * @param null|string $version
+     *   The terminus version to install.
      */
-    public function pantheonInstallTerminus(): void
+    public function pantheonInstallTerminus(?string $version = null): void
     {
         if (!$this->isTerminusInstalled()) {
             try {
                 $userDir = PxApp::userDir();
+                $version = $version ?? self::TERMINUS_STABLE_VERSION;
 
                 $stack = $this->taskExecStack()
-                    ->exec("mkdir {$userDir}/terminus")
+                    ->exec("mkdir -p {$userDir}/terminus")
                     ->exec("cd {$userDir}/terminus")
-                    ->exec('curl -O https://raw.githubusercontent.com/pantheon-systems/terminus-installer/master/builds/installer.phar')
-                    ->exec('php installer.phar install');
+                    ->exec("curl -L https://github.com/pantheon-systems/terminus/releases/download/{$version}/terminus.phar --output terminus")
+                    ->exec('chmod +x terminus')
+                    ->exec('sudo ln -s ~/terminus/terminus /usr/local/bin/terminus');
 
                 $results = $stack->run();
 
