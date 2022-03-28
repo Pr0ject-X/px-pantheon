@@ -20,6 +20,20 @@ class Pantheon
     }
 
     /**
+     * Get the pantheon frameworks.
+     *
+     * @return string[]
+     *   An array of available frameworks.
+     */
+    public static function frameworks(): array
+    {
+        return [
+            'drupal' => 'Drupal',
+            'wordpress' => 'WordPress',
+        ];
+    }
+
+    /**
      * Get the pantheon environments.
      *
      * @return array

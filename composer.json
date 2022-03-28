@@ -12,8 +12,10 @@
         }
     ],
     "require": {
-        "php": ">=7.2",
-        "pr0ject-x/px": "^1.0.9"
+        "php": ">=7.3",
+        "ext-json": "*",
+        "ext-fileinfo": "*",
+        "pr0ject-x/px": "^1.0.19"
     },
     "require-dev": {
         "squizlabs/php_codesniffer": "^3.5",

@@ -4,15 +4,21 @@ declare(strict_types=1);
 
 namespace Pr0jectX\PxPantheon\ProjectX\Plugin\CommandType\Commands;
 
+use Pr0jectX\Px\CommonCommandTrait;
+use Pr0jectX\Px\Contracts\DatabaseInterface;
+use Pr0jectX\Px\Database\Database;
+use Pr0jectX\Px\Database\DatabaseOpener;
 use Pr0jectX\Px\ProjectX\Plugin\PluginCommandTaskBase;
+use Pr0jectX\Px\ProjectX\Plugin\PluginInterface;
 use Pr0jectX\Px\PxApp;
 use Pr0jectX\PxPantheon\Pantheon;
-use Pr0jectX\PxPantheon\ProjectX\Plugin\CommandType\PantheonCommandType;
 use Pr0jectX\Px\Task\LoadTasks as PxTasks;
 use Psr\Cache\CacheItemInterface;
 use Robo\Collection\CollectionBuilder;
 use Robo\Contract\VerbosityThresholdInterface;
-use Stringy\StaticStringy;
+use Robo\Exception\TaskException;
+use Robo\Result;
+use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Question\Question;
 use Symfony\Component\Process\ExecutableFinder;
 
@@ -22,6 +28,7 @@ use Symfony\Component\Process\ExecutableFinder;
 class PantheonCommand extends PluginCommandTaskBase
 {
     use PxTasks;
+    use CommonCommandTrait;
 
     /**
      * Define the terminus stable version
@@ -41,60 +48,65 @@ class PantheonCommand extends PluginCommandTaskBase
     }
 
     /**
-     * Display the pantheon developer information.
-     *
-     * @param null $siteEnv
-     *   The pantheon site environment.
+     * Set up the pantheon project scaffolding.
      */
-    public function pantheonInfo($siteEnv = null): void
+    public function pantheonSetup(): void
     {
         Pantheon::displayBanner();
 
         try {
-            $siteName = $this->getPantheonSiteName();
-            $siteEnv = $siteEnv ?? $this->askForPantheonSiteEnv();
-
-            $this->terminusCommand()
-                ->setSubCommand('connection:info')
-                ->arg("{$siteName}.{$siteEnv}")
-                ->run();
+            $this
+                ->setupPantheonFramework()
+                ->setupPantheonConfiguration();
         } catch (\Exception $exception) {
             $this->error($exception->getMessage());
         }
     }
 
     /**
-     * Setup the project to use the pantheon service.
+     * Display the pantheon developer information.
+     *
+     * @param null $siteEnv
+     *   The pantheon site environment.
      */
-    public function pantheonSetup(): void
+    public function pantheonInfo($siteEnv = null, $opts = [
+        'single' => false,
+        'git-command' => false,
+        'mysql-command' => false,
+        'redis-command' => false,
+    ]): ?Result
     {
-        Pantheon::displayBanner();
-
-        $phpVersions = PxApp::activePhpVersions();
-
-        $phpVersion = $this->askChoice(
-            'Select the PHP version',
-            $phpVersions,
-            $phpVersions[1]
-        );
-
-        $this->taskWriteToFile(PxApp::projectRootPath() . '/pantheon.yml')
-            ->text(Pantheon::loadTemplateFile('pantheon.yml'))
-            ->place('PHP_VERSION', $phpVersion)
-            ->run();
-
-        $framework = $this->askChoice('Select the PHP framework', [
-            'drupal' => 'Drupal',
-            'wordpress' => 'Wordpress'
-        ], 'drupal');
-
         try {
-            if ($framework === 'drupal') {
-                $this->setupDrupal();
+            if (!$opts['quiet']) {
+                Pantheon::displayBanner();
             }
+            $siteName = $this->getPantheonSiteName();
+            $siteEnv = $siteEnv ?? $this->askForPantheonSiteEnv();
+
+            $siteCommand = $this->terminusCommand()
+                ->printOutput(!$opts['quiet'])
+                ->setSubCommand('connection:info')
+                ->arg("$siteName.$siteEnv");
+
+            $commands = array_filter([
+                $opts['git-command'] ? 'git_command' : null,
+                $opts['mysql-command'] ? 'mysql_command' : null,
+                $opts['redis-command'] ? 'redis_command' : null,
+            ]);
+
+            if (!empty($commands)) {
+                if ($opts['single'] === true) {
+                    $siteCommand->option('field', current($commands));
+                } else {
+                    $siteCommand->option('fields', implode(',', $commands));
+                }
+            }
+            return $siteCommand->run();
         } catch (\Exception $exception) {
             $this->error($exception->getMessage());
         }
+
+        return null;
     }
 
     /**
@@ -105,15 +117,18 @@ class PantheonCommand extends PluginCommandTaskBase
      */
     public function pantheonInstallTerminus(?string $version = null): void
     {
-        if (!$this->isTerminusInstalled()) {
+        if ($this->isTerminusInstalled()) {
+            $this->note('The terminus utility has already been installed!');
+        } else {
             try {
                 $userDir = PxApp::userDir();
                 $version = $version ?? $this->fetchLatestTerminusRelease();
+                $baseUrl = 'https://github.com/pantheon-systems/terminus/releases/download';
 
                 $stack = $this->taskExecStack()
-                    ->exec("mkdir -p {$userDir}/terminus")
-                    ->exec("cd {$userDir}/terminus")
-                    ->exec("curl -L https://github.com/pantheon-systems/terminus/releases/download/{$version}/terminus.phar --output terminus")
+                    ->exec("mkdir -p $userDir/terminus")
+                    ->exec("cd $userDir/terminus")
+                    ->exec("curl -L $baseUrl/$version/terminus.phar --output terminus")
                     ->exec('chmod +x terminus')
                     ->exec('sudo ln -s ~/terminus/terminus /usr/local/bin/terminus');
 
@@ -127,52 +142,89 @@ class PantheonCommand extends PluginCommandTaskBase
             } catch (\Exception $exception) {
                 $this->error($exception->getMessage());
             }
-        } else {
-            $this->note('The terminus utility has already been installed!');
         }
     }
 
     /**
-     * Import the local database with the remote pantheon site.
+     * Open a MySQL connect with the pantheon site.
      *
-     * @param string $dbFile
+     * @param string|null $siteEnv
+     *   The pantheon site environment.
+     * @param array $opts
+     *
+     * @option launch
+     *   Open the MySQL connection using a database application.
+     * @option app-name
+     *   Input database application name to use for the connection, requires --launch.
+     *
+     * @return void
+     */
+    public function pantheonMysql(?string $siteEnv = null, array $opts = [
+        'launch' => false,
+        'app-name' => InputOption::VALUE_REQUIRED
+    ]): void
+    {
+        try {
+            $siteName = $this->getPantheonSiteName();
+            $siteEnv = $siteEnv ?? $this->askForPantheonSiteEnv();
+            $appName = $opts['app-name'];
+
+            if ($this->wakePantheonEnvironment($siteName, $siteEnv)) {
+                    $command = isset($opts['launch']) && $opts['launch']
+                    ? $this->getPantheonMysqlOpenCommand($siteName, $siteEnv, $appName)
+                    : $this->getPantheonMysqlCommand($siteName, $siteEnv);
+
+                $this->taskExec($command)->run();
+            }
+        } catch (\Exception $exception) {
+            $this->error($exception->getMessage());
+        }
+    }
+
+
+
+    /**
+     * Import the local database into the pantheon site.
+     *
+     * @param string|null $dbFile
      *   The local path to the database file.
      * @param string $siteEnv
      *   The pantheon site environment.
      */
     public function pantheonImport(
-        string $dbFile = null,
+        ?string $dbFile = null,
         string $siteEnv = 'dev'
     ): void {
-
         try {
-            $siteName = $this->getPantheonSiteName();
-
             if (
                 !isset(Pantheon::environments()[$siteEnv])
                 || in_array($siteEnv, ['test', 'live'])
             ) {
-                throw new \RuntimeException(
+                throw new \InvalidArgumentException(
                     'The environment is invalid! Only the dev environment is allowed at this time!'
                 );
             }
-            $dbFile = $dbFile ?? $this->exportEnvDatabase();
+            $dbFile = $dbFile ?? $this->exportLocalDatabase();
 
             if (!file_exists($dbFile)) {
-                throw new \RuntimeException(
+                throw new \InvalidArgumentException(
                     'The database file path is invalid!'
                 );
             }
+            $siteName = $this->getPantheonSiteName();
 
-            $result = $this->terminusCommand()
-                ->setSubCommand('import:database')
-                ->args(["{$siteName}.{$siteEnv}", $dbFile])
-                ->run();
+            if ($mysqlCommand = $this->getPantheonMysqlCommand($siteName, $siteEnv)) {
+                $importCommand = !$this->isGzipped($dbFile)
+                    ? "$mysqlCommand < $dbFile"
+                    : "gunzip -c $dbFile | $mysqlCommand";
 
-            if ($result->wasSuccessful()) {
-                $this->success(
-                    'The database was successfully imported into the pantheon site.'
-                );
+                $importResult = $this->taskExec($importCommand)->run();
+
+                if ($importResult->wasSuccessful()) {
+                    $this->success(
+                        'The database was successfully imported into the pantheon site.'
+                    );
+                }
             }
         } catch (\Exception $exception) {
             $this->error($exception->getMessage());
@@ -180,14 +232,14 @@ class PantheonCommand extends PluginCommandTaskBase
     }
 
     /**
-     * Run drush commands against the remote Drupal site.
+     * Run a drush command on the pantheon site.
      *
-     * @aliases remote:drupal
+     * @aliases remote:drush, pantheon:drupal
      *
      * @param array $cmd
      *   An arbitrary drush command.
      */
-    public function pantheonDrupal(array $cmd): void
+    public function pantheonDrush(array $cmd): void
     {
         try {
             $siteName = $this->getPantheonSiteName();
@@ -195,7 +247,7 @@ class PantheonCommand extends PluginCommandTaskBase
 
             $command = $this->terminusCommand()
                 ->setSubCommand('remote:drush')
-                ->arg("{$siteName}.{$siteEnv}");
+                ->arg("$siteName.$siteEnv");
 
             if (!empty($cmd)) {
                 $command->args(['--', implode(' ', $cmd)]);
@@ -207,10 +259,10 @@ class PantheonCommand extends PluginCommandTaskBase
     }
 
     /**
-     * Create a site on the remote pantheon service.
+     * Create a new site on the pantheon platform.
      *
      * @param string|null $label
-     *   Set the site human readable label.
+     *   Set the site human-readable label.
      * @param string|null $upstream
      *   Set the site upstream.
      *
@@ -227,7 +279,7 @@ class PantheonCommand extends PluginCommandTaskBase
                 $this->formatQuestion('Input the site label')
             ))->setValidator(function ($value) {
                 if (empty($value)) {
-                    throw new \RuntimeException(
+                    throw new \InvalidArgumentException(
                         'The site label is required!'
                     );
                 }
@@ -244,12 +296,11 @@ class PantheonCommand extends PluginCommandTaskBase
 
             if (isset($upstream) && !isset($upstreamOptions[$upstream])) {
                 throw new \InvalidArgumentException(
-                    sprintf('The site upstream value is invalid!')
+                    'The site upstream value is invalid!'
                 );
             }
-            $name = strtolower(strtr($label, ' ', '-'));
+            $name = strtolower(str_replace(' ', '-', $label));
 
-            /** @var \Robo\Collection\CollectionBuilder $command */
             $command = $this->terminusCommand()
                 ->setSubCommand('site:create')
                 ->args([
@@ -258,13 +309,14 @@ class PantheonCommand extends PluginCommandTaskBase
                     $upstream
                 ]);
 
-            if ($this->confirm('Associate the site with an organization?', false)) {
+            if ($this->confirm('Associate the site with an organization?')) {
                 $orgOptions = $this->getOrgOptions();
 
-                if (count($orgOptions) !== 0) {
-                    if ($org = $this->askChoice('Select an organization', $orgOptions)) {
-                        $command->option('org', $org);
-                    }
+                if (
+                    (count($orgOptions) !== 0)
+                    && $org = $this->askChoice('Select an organization', $orgOptions)
+                ) {
+                    $command->option('org', $org);
                 }
             }
             $result = $command->run();
@@ -280,15 +332,15 @@ class PantheonCommand extends PluginCommandTaskBase
     }
 
     /**
-     * Add a team member to the remote pantheon service.
+     * Add a team member to the pantheon platform.
      *
-     * @param string $email
+     * @param string|null $email
      *   The member email address.
      * @param string $role
      *   The member role name, e.g. (developer, team_member).
      */
     public function pantheonAddMember(
-        string $email = null,
+        ?string $email = null,
         string $role = 'team_member'
     ): void {
         Pantheon::displayBanner();
@@ -301,12 +353,12 @@ class PantheonCommand extends PluginCommandTaskBase
                     $this->formatQuestion('Input the site user email address')
                 ))->setValidator(function ($value) {
                     if (empty($value)) {
-                        throw new \RuntimeException(
+                        throw new \InvalidArgumentException(
                             'The user email address is required!'
                         );
                     }
                     if (!filter_var($value, FILTER_VALIDATE_EMAIL)) {
-                        throw new \RuntimeException(
+                        throw new \InvalidArgumentException(
                             'The user email address is invalid!'
                         );
                     }
@@ -317,7 +369,7 @@ class PantheonCommand extends PluginCommandTaskBase
 
             if (!in_array($role, $roleOptions)) {
                 $this->error(
-                    sprintf('The user role is invalid!')
+                    'The user role is invalid!'
                 );
                 return;
             }
@@ -339,9 +391,9 @@ class PantheonCommand extends PluginCommandTaskBase
     }
 
     /**
-     *  Sync the remote pantheon database with the local environment.
+     * Sync the pantheon site database with the local environment.
      *
-     * @param string $siteEnv
+     * @param string|null $siteEnv
      *   The environment to sync the database from e.g (dev, test, live).
      * @param array $opts
      * @option $no-backup
@@ -349,7 +401,7 @@ class PantheonCommand extends PluginCommandTaskBase
      * @option $filename
      *   The filename of the remote database that's downloaded.
      */
-    public function pantheonSync(string $siteEnv = null, $opts = [
+    public function pantheonSync(?string $siteEnv = null, array $opts = [
         'no-backup' => false,
         'filename' => 'remote.db.sql.gz'
     ]): void
@@ -365,7 +417,7 @@ class PantheonCommand extends PluginCommandTaskBase
             if (!$opts['no-backup']) {
                 $collection->addTask($this->terminusCommand()
                     ->setSubCommand('backup:create')
-                    ->arg("{$siteName}.{$siteEnv}")
+                    ->arg("$siteName.$siteEnv")
                     ->option('element', 'db'));
             }
 
@@ -374,32 +426,227 @@ class PantheonCommand extends PluginCommandTaskBase
                 $opts['filename']
             ]);
 
-            if (file_exists($dbBackupFilename)) {
-                $this->_remove($dbBackupFilename);
+            if (
+                !file_exists($dbBackupFilename)
+                || $this->confirm('Download the pantheon database again?')
+            ) {
+                $collection->addTask($this->taskFilesystemStack()->remove($dbBackupFilename));
+                $collection->addTask($this->terminusCommand()
+                    ->setSubCommand('backup:get')
+                    ->arg("$siteName.$siteEnv")
+                    ->option('element', 'db')
+                    ->option('to', $dbBackupFilename));
             }
-
-            $collection->addTask($this->terminusCommand()
-                ->setSubCommand('backup:get')
-                ->arg("{$siteName}.{$siteEnv}")
-                ->option('element', 'db')
-                ->option('to', $dbBackupFilename));
-
             $backupResult = $collection->run();
 
-            if ($backupResult->wasSuccessful()) {
-                $this->importEnvDatabase($dbBackupFilename);
-            } else {
-                throw new \RuntimeException(sprintf(
+            if (!$backupResult->wasSuccessful()) {
+                throw new \InvalidArgumentException(sprintf(
                     'Unable to sync the %s.%s database with environment.',
                     $siteName,
                     $siteEnv
                 ));
             }
+            $this->importLocalDatabase($dbBackupFilename);
         } catch (\Exception $exception) {
             $this->error($exception->getMessage());
         }
     }
 
+    /**
+     * Set up the pantheon configuration.
+     *
+     * @return $this
+     */
+    protected function setupPantheonConfiguration(): self
+    {
+        $plugin = $this->getPlugin();
+        $phpVersion = $plugin->getPantheonPhpVersion();
+
+        if (!isset($phpVersion)) {
+            throw new \InvalidArgumentException(
+                'The pantheon PHP version has not been defined!'
+            );
+        }
+
+        $this->taskWriteToFile(PxApp::projectRootPath() . '/pantheon.yml')
+            ->text(Pantheon::loadTemplateFile('pantheon.yml'))
+            ->place('PHP_VERSION', $phpVersion)
+            ->run();
+
+        return $this;
+    }
+
+    /**
+     * Set up the pantheon framework.
+     *
+     * @return $this
+     */
+    protected function setupPantheonFramework(): self
+    {
+        $plugin = $this->getPlugin();
+        $framework = $plugin->getPantheonFramework();
+
+        if (!isset($framework)) {
+            throw new \InvalidArgumentException(
+                'The pantheon framework has not been defined!'
+            );
+        }
+
+        if ($framework === 'drupal') {
+            $this->setupFrameworkDrupal();
+        }
+
+        return $this;
+    }
+
+    /**
+     * Get the pantheon MySQL database.
+     *
+     * @param string $siteName
+     *   The pantheon site name.
+     * @param string $siteEnv
+     *   The pantheon site environment.
+     *
+     * @return \Pr0jectX\Px\Contracts\DatabaseInterface
+     *   The pantheon MySQL database instance.
+     *
+     * @throws \JsonException
+     */
+    protected function getPantheonMysqlDatabase(
+        string $siteName,
+        string $siteEnv
+    ): DatabaseInterface {
+        $task = $this->terminusCommand()
+            ->setSubCommand('connection:info')
+            ->arg("$siteName.$siteEnv")
+            ->option('--format', 'json')
+            ->option('--fields', 'mysql_host,mysql_port,mysql_database,mysql_username,mysql_password');
+
+        $database = new Database();
+        $mysqlResult = $this->runSilentCommand($task);
+
+        if ($mysqlResult->wasSuccessful()) {
+            $mysqlData = json_decode(
+                $mysqlResult->getMessage(),
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            );
+            $database
+                ->setType('mysql')
+                ->setHost($mysqlData['mysql_host'])
+                ->setPort($mysqlData['mysql_port'])
+                ->setDatabase($mysqlData['mysql_database'])
+                ->setUsername($mysqlData['mysql_username'])
+                ->setPassword($mysqlData['mysql_password']);
+        }
+
+        return $database;
+    }
+
+    /**
+     * Get pantheon mysql open command.
+     *
+     * @param string $siteName
+     *   The pantheon site name.
+     * @param string $siteEnv
+     *   The pantheon site environment.
+     * @param string|null $appName
+     *   The database application name.
+     *
+     * @return string|null
+     *   The mysql open command.
+     *
+     * @throws \JsonException
+     */
+    protected function getPantheonMysqlOpenCommand(
+        string $siteName,
+        string $siteEnv,
+        string $appName = null
+    ): ?string {
+        $database = $this->getPantheonMysqlDatabase($siteName, $siteEnv);
+
+        if (!$database->isValid()) {
+            throw new \RuntimeException(
+                'The pantheon database is invalid!'
+            );
+        }
+        $databaseOpener = new DatabaseOpener();
+        $databaseOptions = $databaseOpener->applicationOptions();
+
+        $appDefault = array_key_exists(DatabaseOpener::DEFAULT_APPLICATION, $databaseOptions)
+            ? DatabaseOpener::DEFAULT_APPLICATION
+            : array_key_first($databaseOptions);
+
+        if (!isset($appName, $databaseOptions[$appName])) {
+            $appName = count($databaseOptions) === 1
+                ? array_key_first($databaseOptions)
+                : $this->askChoice(
+                    'Select the database application to launch',
+                    $databaseOptions,
+                    $appDefault
+                );
+        }
+
+        return $databaseOpener->command($appName, $database);
+    }
+
+    /**
+     * Get the pantheon MySQL command.
+     *
+     * @param string $siteName
+     *   The pantheon site name.
+     * @param string $siteEnv
+     *   The pantheon site environment.
+     *
+     * @return string|null
+     *   The pantheon MySQL command.
+     */
+    protected function getPantheonMysqlCommand(
+        string $siteName,
+        string $siteEnv
+    ): ?string {
+         $task = $this->terminusCommand()
+            ->setSubCommand('connection:info')
+            ->arg("$siteName.$siteEnv")
+            ->option('--field', 'mysql_command');
+
+        $mysqlResult = $this->runSilentCommand($task);
+
+        if ($mysqlResult->wasSuccessful()) {
+            return $mysqlResult->getMessage();
+        }
+
+        return null;
+    }
+
+    /**
+     * Wake up a pantheon environment.
+     *
+     * @param string $siteName
+     *   The pantheon site name.
+     * @param string $siteEnv
+     *   The pantheon site environment.
+     *
+     * @return bool
+     *   Return true if the wakeup was successful; otherwise false.
+     */
+    protected function wakePantheonEnvironment(
+        string $siteName,
+        string $siteEnv
+    ): bool {
+        $task = $this->terminusCommand()
+            ->setSubCommand('env:wake')
+            ->arg("$siteName.$siteEnv");
+
+        $result = $this->runSilentCommand($task);
+
+        if ($result->wasSuccessful()) {
+            return true;
+        }
+
+        return false;
+    }
 
     /**
      * Determine if terminus has been installed.
@@ -435,60 +682,54 @@ class PantheonCommand extends PluginCommandTaskBase
     }
 
     /**
-     * Import the environment database.
+     * Import the local environment database.
      *
      * @param string $sourceFile
      *   The database source file.
-     * @param bool $sourceCleanUp
-     *   Delete the database source file after import.
-     *
-     * @return bool
-     *   Return true if the import was successful; otherwise false.
      */
-    protected function importEnvDatabase(
-        string $sourceFile,
-        bool $sourceCleanUp = true
-    ): bool {
+    protected function importLocalDatabase(
+        string $sourceFile
+    ): void {
         if ($command = $this->findCommand('db:import')) {
-            $syncDbCollection = $this->collectionBuilder();
+            $collection = $this->collectionBuilder();
 
             if (!PxApp::getEnvironmentInstance()->isRunning()) {
-                $syncDbCollection->addTask(
+                $collection->addTask(
                     $this->taskSymfonyCommand(
                         $this->findCommand('env:start')
                     )
                 );
             }
-            $syncDbCollection->addTask(
+            $collection->addTask(
                 $this->taskSymfonyCommand($command)->arg(
                     'importFile',
                     $sourceFile
                 )
             );
-            $importResult = $syncDbCollection->run();
+            $importResult = $collection->run();
 
-            if ($sourceCleanUp && $importResult->wasSuccessful()) {
-                $this->_remove($sourceFile);
-                return true;
+            if (!$importResult->wasSuccessful()) {
+                throw new \InvalidArgumentException(
+                    "The database was not synced. As the environment doesn't support that feature!"
+                );
             }
         }
-
-        throw new \RuntimeException(
-            "The database was not automatically synced. As the environment doesn't support that feature!"
-        );
     }
 
     /**
-     * Export the environment database.
+     * Export the local environment database.
+     *
+     * @param string $dbFilename
+     *   The exported database filename.
      *
      * @return string
      *   Return the exported database file.
+     *
+     * @throws \Robo\Exception\TaskException
      */
-    protected function exportEnvDatabase(): string
+    protected function exportLocalDatabase(string $dbFilename = 'local.db'): ?string
     {
         if ($command = $this->findCommand('db:export')) {
-            $dbFilename = 'local.db';
-
             $dbExportFile = implode(
                 DIRECTORY_SEPARATOR,
                 [PxApp::projectTempDir(), $dbFilename]
@@ -500,105 +741,77 @@ class PantheonCommand extends PluginCommandTaskBase
                 ->opt('filename', $dbFilename)
                 ->run();
 
-            if ($exportResult->wasSuccessful()) {
-                return "{$dbExportFile}.sql.gz";
+            if (!$exportResult->wasSuccessful()) {
+                throw new TaskException(
+                    $exportResult->getTask(),
+                    'Unable to export the local database.'
+                );
             }
+
+            return "$dbExportFile.sql.gz";
         }
 
-        throw new \RuntimeException('Unable to export the local database.');
+        return null;
     }
 
     /**
-     * Setup the Drupal pantheon integration.
+     * Set up pantheon to work with the Drupal framework.
      */
-    protected function setupDrupal(): void
+    protected function setupFrameworkDrupal(): void
     {
         if (
             !PxApp::composerHasPackage('drupal/core')
             && !PxApp::composerHasPackage('drupal/core-recommended')
         ) {
-            throw new \RuntimeException(
+            throw new \InvalidArgumentException(
                 'Install Drupal core prior to running the pantheon setup.'
             );
         }
-        $drupalRoot = $this->findDrupalRoot() ?? $this->ask(
-            'Input the Drupal root'
-        );
+        $collection = $this->collectionBuilder();
 
-        $drupalRootPath = implode(
-            DIRECTORY_SEPARATOR,
-            [PxApp::projectRootPath(), $drupalRoot]
-        );
-
-        if (!file_exists($drupalRootPath)) {
-            throw new \RuntimeException(
-                "The Drupal root path doesn't exist!"
+        if (!pxApp::composerHasPackage('pantheon-systems/drupal-integrations')) {
+            $collection->addTask(
+                $this->taskComposerConfig()
+                    ->arg('extra.drupal-scaffold.allowed-packages')
+                    ->arg('["pantheon-systems/drupal-integrations"]')
+                    ->option('--json')
+                    ->option('--merge')
+            );
+            $collection->addTask(
+                $this->taskComposerRequire()
+                    ->arg('pantheon-systems/drupal-integrations')
+                    ->option('--with-all-dependencies')
             );
         }
-        $collection = $this->collectionBuilder();
-        $drupalDefault = "{$drupalRootPath}/sites/default";
-
-        $collection
-            ->addTask(
-                $this->taskWriteToFile("{$drupalDefault}/settings.pantheon.php")
-                    ->text(Pantheon::loadTemplateFile('drupal/settings.pantheon.txt'))
-            );
-
-        $collection->addTask(
-            $this->taskWriteToFile("{$drupalDefault}/settings.php")
-                ->append()
-                ->appendUnlessMatches(
-                    '/^include.+settings.pantheon.php";$/m',
-                    Pantheon::loadTemplateFile('drupal/settings.include.txt')
-                )
-        );
 
         if ($this->confirm('Add Drupal quicksilver scripts?', true)) {
-            $collection->addTaskList([
+            $collection->addTask(
                 $this->taskWriteToFile(PxApp::projectRootPath() . '/pantheon.yml')
                     ->append()
                     ->appendUnlessMatches(
                         '/^workflows:$/',
                         Pantheon::loadTemplateFile('drupal/pantheon.workflows.txt')
                     ),
-                $this->taskWriteToFile("{$drupalRootPath}/private/hooks/afterSync.php")
-                    ->text(Pantheon::loadTemplateFile('drupal/hooks/afterSync.txt')),
-                $this->taskWriteToFile("{$drupalRootPath}/private/hooks/afterDeploy.php")
-                    ->text(Pantheon::loadTemplateFile('drupal/hooks/afterDeploy.txt')),
-            ]);
+            );
+
+            if (!pxApp::composerHasPackage('pr0ject-x/pantheon-drupal-quicksilver')) {
+                $collection->addTask($this->taskComposerConfig()
+                    ->arg('extra.installer-paths')
+                    ->arg('{"web/private/scripts/quicksilver/{$name}/": ["type:quicksilver-script"]}')
+                    ->option('--json')
+                    ->option('--merge'));
+                $collection->addTask(
+                    $this->taskComposerRequire()->arg('pr0ject-x/pantheon-drupal-quicksilver'),
+                );
+            }
         }
         $result = $collection->run();
 
         if ($result->wasSuccessful()) {
             $this->success(
-                sprintf('The pantheon setup was successful for the Drupal framework!')
+                'The pantheon setup was successful for the Drupal framework!'
             );
         }
-    }
-
-    /**
-     * Find the Drupal root directory.
-     *
-     * @return string
-     *   The Drupal root directory if found.
-     */
-    protected function findDrupalRoot(): string
-    {
-        $composerJson = PxApp::getProjectComposer();
-
-        if (
-            isset($composerJson['extra'])
-            && isset($composerJson['extra']['installer-paths'])
-        ) {
-            foreach ($composerJson['extra']['installer-paths'] as $path => $types) {
-                if (!in_array('type:drupal-core', $types)) {
-                    continue;
-                }
-                return dirname($path, 1);
-            }
-        }
-
-        return '';
     }
 
     /**
@@ -611,8 +824,8 @@ class PantheonCommand extends PluginCommandTaskBase
     {
         $siteName = $this->getPlugin()->getPantheonSite();
 
-        if (!isset($siteName) || empty($siteName)) {
-            throw new \RuntimeException(
+        if (empty($siteName)) {
+            throw new \InvalidArgumentException(
                 "The pantheon site name is required.\nRun the `vendor/bin/px config:set pantheon` command."
             );
         }
@@ -623,22 +836,60 @@ class PantheonCommand extends PluginCommandTaskBase
     /**
      * Ask to select the pantheon site environment.
      *
-     * @param string $default
-     *   The default site environment.
-     *
+     * @param string $siteEnv
+     *   The pantheon site environment.
      * @param array $exclude
+     *   An array of site environments to exclude.
+     *
      * @return string
      *   The pantheon site environment.
      */
-    protected function askForPantheonSiteEnv($default = 'dev', $exclude = []): string
+    protected function askForPantheonSiteEnv(string $siteEnv = 'dev', array $exclude = []): string
     {
+        $environments = array_filter(array_merge(
+            Pantheon::environments(),
+            $this->getPantheonMultiDevSites()
+        ));
+
         return $this->askChoice(
             'Select the pantheon site environment',
-            array_filter(Pantheon::environments(), function ($key) use ($exclude) {
-                return !in_array($key, $exclude);
+            array_filter($environments, static function ($key) use ($exclude) {
+                return !in_array($key, $exclude, true);
             }, ARRAY_FILTER_USE_KEY),
-            $default
+            $siteEnv
         );
+    }
+
+    /**
+     * Get the pantheon multi-dev sites.
+     *
+     * @return array
+     *   An array of the pantheon multi-dev sites.
+     */
+    protected function getPantheonMultiDevSites(): array
+    {
+        try {
+            $siteName = $this->getPantheonSiteName();
+            $results = $this->runSilentCommand($this->terminusCommand()
+                ->setSubCommand('multidev:list')
+                ->arg($siteName)
+                ->option('--quiet')
+                ->option('--field', 'id'));
+
+            if ($results->wasSuccessful()) {
+                $sites = array_map('trim', explode(
+                    "\n",
+                    $results->getMessage()
+                ));
+                return !empty($sites)
+                    ? array_combine($sites, $sites)
+                    : [];
+            }
+        } catch (\Exception $exception) {
+            $this->error($exception->getMessage());
+        }
+
+        return [];
     }
 
     /**
@@ -698,7 +949,7 @@ class PantheonCommand extends PluginCommandTaskBase
         $options = [];
 
         foreach ($this->buildCommandListArray($subCommand) as $data) {
-            if (!isset($data[$optionKey]) || !isset($data[$valueKey])) {
+            if (!isset($data[$optionKey], $data[$valueKey])) {
                 continue;
             }
             $options[$data[$optionKey]] = $data[$valueKey];
@@ -721,12 +972,12 @@ class PantheonCommand extends PluginCommandTaskBase
      *
      * @throws \Psr\Cache\InvalidArgumentException
      */
-    protected function buildCommandListArray(string $subCommand, $cacheExpiration = 3600): array
+    protected function buildCommandListArray(string $subCommand, int $cacheExpiration = 3600): array
     {
-        $cacheKey = strtr($subCommand, ':', '.');
+        $cacheKey = str_replace(':', '.', $subCommand);
 
         return $this->pluginCache()->get(
-            "commandOutput.{$cacheKey}",
+            "commandOutput.$cacheKey",
             function (CacheItemInterface $item) use ($subCommand, $cacheExpiration) {
                 $item->expiresAfter($cacheExpiration);
 
@@ -740,11 +991,40 @@ class PantheonCommand extends PluginCommandTaskBase
                 if ($result->wasSuccessful()) {
                     return json_decode(
                         $result->getMessage(),
-                        true
+                        true,
+                        512,
+                        JSON_THROW_ON_ERROR
                     );
                 }
+
+                return null;
             }
         ) ?? [];
+    }
+
+    /**
+     * Determine if the file is gzipped.
+     *
+     * @param string $filepath
+     *   The fully qualified path to the file.
+     *
+     * @return bool
+     */
+    protected function isGzipped(string $filepath): bool
+    {
+        if (!file_exists($filepath)) {
+            throw new \InvalidArgumentException(
+                'The file path does not exist.'
+            );
+        }
+        $contentType = mime_content_type($filepath);
+
+        $mimeType = substr(
+            $contentType,
+            strpos($contentType, '/') + 1
+        );
+
+        return $mimeType === 'x-gzip' || $mimeType === 'gzip';
     }
 
     /**
@@ -766,7 +1046,7 @@ class PantheonCommand extends PluginCommandTaskBase
      *
      * @return \Pr0jectX\PxPantheon\ProjectX\Plugin\CommandType\PantheonCommandType
      */
-    protected function getPlugin(): PantheonCommandType
+    protected function getPlugin(): PluginInterface
     {
         return $this->plugin;
     }
@@ -774,7 +1054,7 @@ class PantheonCommand extends PluginCommandTaskBase
     /**
      * Retrieve the terminus command.
      *
-     * @return \Pr0jectX\PxPantheon\Task\ExecCommand|\Robo\Collection\CollectionBuilder
+     * @return \Pr0jectX\Px\Task\ExecCommand|\Robo\Collection\CollectionBuilder
      */
     protected function terminusCommand(): CollectionBuilder
     {

@@ -1,4 +1,6 @@
 api_version: 1
 web_docroot: true
+database:
+    version: 10.4
 php_version: {PHP_VERSION}
 enforce_https: transitional
